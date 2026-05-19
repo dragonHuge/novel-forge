@@ -130,28 +130,172 @@ bash install.sh
 
 ---
 
+## 技术架构
+
+### 设计哲学
+
+Novel Forge 不是一个"大而全的 AI 写作 App"，是一组**可组合的 AI Agent Skill**。它跑在 Claude Code / Codex 里，和你的写作项目共享同一个工作目录。
+
+核心设计原则：
+- **纪律不靠自觉** —— hook 在 harness 层强制执行，不是"建议你不要改预测"，是"你改不了"
+- **状态集中** —— 一个 `.novel-state.json` 是全部运行时状态的 single source of truth
+- **Skill 职责单一** —— 每个 skill 只做一件事，只读/写它该碰的文件
+- **数据源可插拔** —— adapter 模式隔离平台差异，换平台不改核心逻辑
+
+### 整体架构图
+
+```
+┌─────────────────────────────────────────────────────┐
+│                   Claude Code / Codex                │
+│                                                     │
+│  ┌───────────────────────────────────────────────┐  │
+│  │              SKILL.md (总协议)                  │  │
+│  │     触发词路由 → 分发到对应子 skill             │  │
+│  └───────────────┬───────────────────────────────┘  │
+│                  │                                   │
+│  ┌───────────────▼───────────────────────────────┐  │
+│  │             10 个子 Skill                      │  │
+│  │                                               │  │
+│  │  novel-init    novel-score    novel-predict    │  │
+│  │  novel-publish novel-retro   novel-status     │  │
+│  │  novel-seed    novel-learn-from               │  │
+│  │  novel-bump    novel-migrate                  │  │
+│  └───────────────┬───────────────────────────────┘  │
+│                  │                                   │
+│  ┌───────────────▼───────────────────────────────┐  │
+│  │            Hooks (harness 强制层)              │  │
+│  │                                               │  │
+│  │  PreToolUse:                                  │  │
+│  │    score-immutability.sh   → 锁立项评分段      │  │
+│  │    prediction-immutability.sh → 锁预测段       │  │
+│  │  SessionStart:                                │  │
+│  │    session-start.sh → 校准状态仪表盘           │  │
+│  └───────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────┘
+                       │
+          ┌────────────┼────────────┐
+          ▼            ▼            ▼
+   .novel-state.json  predictions/  rubric_notes.md
+   (运行时状态)       (不可变预测)   (进化的评分公式)
+```
+
+### Hook 系统
+
+Hook 是 Claude Code 的 harness 能力——在工具调用前/后执行 shell 脚本，返回非零退出码即阻塞操作。
+
+| Hook | 事件 | 拦截逻辑 |
+|------|------|---------|
+| `score-immutability.sh` | PreToolUse(Edit\|Write) | 拦截对 `创作设定.md` 中 `## 立项评分` 段的修改 |
+| `prediction-immutability.sh` | PreToolUse(Edit\|Write) | 拦截对 `predictions/*.md` 中 `## 预测` 段的修改 |
+| `session-start.sh` | SessionStart | 读 `.novel-state.json`，输出校准仪表盘到 Claude 上下文 |
+
+技术实现：读 stdin 的 JSON（含 `tool_name`、`tool_input.file_path`、`tool_input.old_string`），用 awk 提取目标段落，grep -F 判断编辑是否触及受保护区间。
+
+### 状态管理
+
+`.novel-state.json`（schema v1.0）是唯一的运行时状态文件：
+
+```json
+{
+  "schema_version": "1.0",
+  "rubric_version": "v0",
+  "platform": "fanqie",
+  "calibration_samples": 0,
+  "pending_retros": [],
+  "consecutive_directional_errors": [],
+  "last_prediction_at": null,
+  "last_retro_at": null,
+  "initialized_at": "2026-05-17T00:00:00+08:00"
+}
+```
+
+设计约束：
+- **原子写入**：写临时文件 → `os.replace()` 防损坏
+- **单写者**：每个字段只有一个 skill 负责更新
+- **向前兼容**：新版本 skill 读旧 state 用 `get(field, default)`
+- **schema 迁移**：`schema_version` 变更走 `migrations/` 链式升级
+
+### 校准飞轮（数据流）
+
+```
+novel-score          novel-predict         novel-publish        novel-retro
+    │                     │                     │                    │
+    │ 7维打分             │ 生成预测文件          │ 登记发布时间        │ 写入复盘段
+    │ (只输出)            │ (predictions/*.md)   │ (更新header)       │ (对账+观察)
+    ▼                     ▼                     ▼                    ▼
+                   .novel-state.json ◄──────── 每步都更新 ────────────┘
+                          │
+                          │ calibration_samples >= 5
+                          │ consecutive_errors >= 3
+                          ▼
+                    novel-bump
+                    (升级 rubric_notes.md)
+```
+
+### Adapter 模式
+
+平台差异通过 adapter 隔离：
+
+```
+adapters/
+├── fanqie/          # 番茄小说：收入档位 S/A/B/C/D，复盘窗口 7d/30d
+├── qidian/          # 起点：月票/推荐票/均订，复盘窗口 30d (计划中)
+└── qimao/           # 七猫：(计划中)
+```
+
+每个 adapter 定义：可收集指标、收入档位边界、复盘窗口、数据收集方式（手动/自动）。核心 skill 逻辑不感知平台细节。
+
+### 子 Skill 职责矩阵
+
+| Skill | 读 | 写 | 关键约束 |
+|-------|----|----|---------|
+| novel-init | — | 所有脚手架文件 | 不覆盖已有文件 |
+| novel-score | 创作设定 + rubric | 无（只输出） | 纯只读 |
+| novel-predict | 创作设定 + 审核报告 + state | predictions/*.md + state | 盲检 + 不可变 |
+| novel-publish | predictions/*.md + state | header + state | 不碰预测段 |
+| novel-retro | predictions/*.md + state + rubric | 复盘段 + state + rubric_notes | hash 校验 |
+| novel-status | state + predictions/ + novels/ | 无（只输出） | 纯只读 |
+| novel-seed | candidates.md | candidates.md | 不做精确打分 |
+| novel-learn-from | 对标作品 | samples/ + rubric_notes | 不计入 calibration |
+| novel-bump | rubric_notes + predictions/ | rubric_notes + state | 全量重打分验证 |
+| novel-migrate | state + migrations/ | state | 幂等 + 备份 |
+
+### 安装原理
+
+`install.sh` 把每个 `skills/<name>/` 目录 symlink 到 `~/.claude/skills/<name>`。Claude Code 启动时扫描该目录，自动注册所有 skill 的触发词。Symlink 模式下修改源文件立即生效；`--copy` 模式冻结版本。
+
 ## 项目结构
 
 ```
 novel-forge/
-├── SKILL.md                    # 总协议 + 路由
-├── skills/                     # 10 个子 skill
-│   ├── novel-init/             # onboarding
-│   ├── novel-predict/          # 盲预测
-│   ├── novel-retro/            # 数据复盘
-│   ├── novel-score/            # 打分（不写文件）
-│   ├── novel-seed/             # 选题讨论
-│   ├── novel-publish/          # 登记发布
-│   ├── novel-status/           # 状态看板
-│   ├── novel-learn-from/       # 对标作品导入
-│   ├── novel-bump/             # 评分公式升级
-│   └── novel-migrate/          # schema 迁移
-├── hooks/                      # harness 强制层
-├── templates/                  # 文件骨架
-├── starter-rubrics/            # 初始评分卡
-├── shared-references/          # 跨 skill 协议
-├── adapters/                   # 平台适配器
-└── migrations/                 # schema 版本管理
+├── SKILL.md                    # 总协议 + 路由（Agent 的入口）
+├── skills/                     # 10 个子 skill（各自独立 SKILL.md）
+│   ├── novel-init/             # onboarding（5 问题 → 脚手架）
+│   ├── novel-predict/          # 盲预测（6 phase → immutable 文件）
+│   ├── novel-retro/            # 数据复盘（6 phase → 对账 + 观察）
+│   ├── novel-score/            # 打分（只读输出，不写文件）
+│   ├── novel-seed/             # 选题讨论（一次一个深挖）
+│   ├── novel-publish/          # 发布登记（轻量元数据更新）
+│   ├── novel-status/           # 状态看板（只读仪表盘）
+│   ├── novel-learn-from/       # 对标作品导入（冷启动信号）
+│   ├── novel-bump/             # 评分公式升级（最高风险动作）
+│   └── novel-migrate/          # schema 迁移（幂等升级链）
+├── hooks/                      # harness 强制层（shell 脚本）
+│   ├── prediction-immutability.sh
+│   ├── score-immutability.sh
+│   └── session-start.sh
+├── templates/                  # 文件骨架（init 时生成到用户项目）
+├── starter-rubrics/            # 初始评分卡（短篇 + 连载）
+├── shared-references/          # 跨 skill 协议文档
+│   ├── blind-prediction-protocol.md
+│   ├── state-management.md
+│   └── observation-lifecycle.md
+├── adapters/                   # 平台适配器（可插拔）
+│   └── fanqie/
+├── migrations/                 # schema 版本管理
+│   └── registry.md
+├── install.sh / uninstall.sh   # 一键安装/卸载
+└── README.md / LICENSE / CHANGELOG.md
 ```
 
 ---
