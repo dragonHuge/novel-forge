@@ -1,8 +1,8 @@
 ---
 name: novel-forge
-description: 给所有想把"我觉得这个故事能火"变成可校准实验的网文创作者。**方法论通用**——打分 → 盲预测 → 发布 → T+7d 复盘 → 进化 rubric 的循环适用任何能被量化（追更率 / 完读率 / 收入 / 收藏增量）的小说形态。**rubric 是循环的内容，不是循环本身**——当前内置连载小说和短篇小说两份 starter rubric（番茄小说平台拟合），其他平台可借这套起步并 bump 调权重。**强烈建议导入对标作品**作为初始信号源（/novel-learn-from）。触发词："初始化"/"打分"/"预测"/"已发布"/"复盘"/"升级评分"/"找选题"/"状态"/"对标"/"learn from"。**首次使用必须先跑 /novel-init。**
-argument-hint: [manuscript-path] [-- mode: cold-start|calibration]
-allowed-tools: Bash(*), Read, Write, Edit, Grep, Glob, Skill, mcp__llm-chat__chat
+description: "给所有想把"我觉得这个故事能火"变成可校准实验的网文创作者。方法论通用——打分 → 盲预测 → 发布 → T+7d 复盘 → 进化 rubric 的循环适用任何能被量化的小说形态。当前内置连载小说和短篇小说两份 starter rubric（番茄小说平台拟合），其他平台可借这套起步并 bump 调权重。强烈建议导入对标作品作为初始信号源。首次使用必须先跑 /novel-init。"
+argument-hint: "[manuscript-path] [-- mode: cold-start|calibration]"
+allowed-tools: "Bash(*), Read, Write, Edit, Grep, Glob, Skill"
 ---
 
 # Novel Forge / 小说锻造炉
