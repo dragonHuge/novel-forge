@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "rubric_version": "v0",
+  "platform": "fanqie",
+  "calibration_samples": 0,
+  "calibration_samples_at_last_bump": 0,
+  "last_prediction_at": null,
+  "last_published_at": null,
+  "last_retro_at": null,
+  "consecutive_directional_errors": [],
+  "pending_retros": [],
+  "initialized_at": null
+}
